@@ -1,0 +1,74 @@
+name: Build Releases
+on: push
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: full
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-linux-android
+
+    steps:
+      - name: Cleanup pre-installed tools
+        run: |
+          # A fix for https://github.com/actions/virtual-environments/issues/1918
+          shopt -s nullglob
+          sudo rm -rf /usr/share/{dotnet,swift,az*,gradle*,*conda} \
+            /opt/{ghc,az} \
+            /usr/local/share/boost /usr/local/graalvm /usr/local/julia* "$AGENT_TOOLSDIRECTORY"
+
+      - uses: actions/checkout@v2
+
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          default: true
+          override: true
+
+      - run: cargo install cross --git https://github.com/cross-rs/cross || true
+        if: matrix.target != 'x86_64-unknown-linux-gnu'
+
+      - name: Build ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -e
+          cargo update
+          target=${{ matrix.target }}
+          if [ $target = x86_64-unknown-linux-gnu ]; then
+            cargo build --release
+          else
+            cross build --release --target $target
+          fi
+          bin=target/$target/release/clash-roam
+          if ! [ -f $bin ]; then
+            bin=target/release/clash-roam
+          fi
+          FILE=clash-roam-${GITHUB_SHA::7}-$target.xz
+          echo "FILE=$FILE" >> $GITHUB_ENV
+          xz -cv $bin > $FILE
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.FILE }}
+          path: ${{ env.FILE }}
