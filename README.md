@@ -10,7 +10,7 @@ Monitor changes of local IPv4 addresses on Linux.
 
 ```toml
 [dependencies]
-ip-roam = "0.1"
+ip-roam = "0.2"
 ```
 
 Check [examples](examples/) or [Documentation](https://docs.rs/ip-roam) for details.
