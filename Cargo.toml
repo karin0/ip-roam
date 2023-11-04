@@ -1,0 +1,23 @@
+[package]
+name = "ip-roam"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["karin0 <karin0@gmx.com>"]
+description = "Monitor changes of local IPv4 addresses on Linux"
+repository = "https://github.com/karin0/ip-roam"
+
+[dependencies]
+netlink-proto = "0.11"
+netlink-packet-core = "0.7"
+netlink-packet-route = "0.17"
+rtnetlink = "0.13"
+futures = "0.3"
+tokio = { version = "1.33", features = [ "rt" ], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.33", features = [ "rt", "macros" ] }
+
+[features]
+default = ["spawn"]
+spawn = ["dep:tokio"]
