@@ -155,8 +155,8 @@ pub struct Handle {
 
 /// A pending connection to the netlink socket.
 pub struct Connection {
-    /// Before using the `handle`, the `conn` future must be spawned.
     pub conn: RtConnection<RtnlMessage>,
+    /// The `conn` future must be spawned before the `handle` could work.
     pub handle: Handle,
 }
 
@@ -175,13 +175,6 @@ impl Connection {
             },
         })
     }
-
-    /// Starts the connection via the existing tokio runtime, enabling the inner handle.
-    #[cfg(feature = "spawn")]
-    pub fn spawn(self) -> Handle {
-        tokio::spawn(self.conn);
-        self.handle
-    }
 }
 
 #[cfg(test)]
@@ -192,9 +185,10 @@ mod tests {
     #[tokio::test]
     async fn has_loopback() {
         let c = Connection::new().unwrap();
-        tokio::spawn(c.conn);
+        let rt = tokio::spawn(c.conn);
         let s = c.handle.addresses.stream();
         let r = s.any(|m| async move { m.addr.is_loopback() }).await;
         assert!(r);
+        rt.abort();
     }
 }

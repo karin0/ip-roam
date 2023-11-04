@@ -5,14 +5,15 @@ use std::pin::pin;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let c = Connection::new()?.spawn();
+    let c = Connection::new()?;
+    tokio::spawn(c.conn);
 
-    let mut s = pin!(c.addresses.stream());
+    let mut s = pin!(c.handle.addresses.stream());
     while let Some(addr) = s.next().await {
         println!("current: {:?}", addr);
     }
 
-    let mut s = pin!(c.monitor.stream());
+    let mut s = pin!(c.handle.monitor.stream());
     while let Some(item) = s.next().await {
         println!("monitor: {:?}", item);
     }
