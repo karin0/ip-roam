@@ -20,15 +20,15 @@ fn parse_addr(am: &Address, if_name: &str) -> Option<Ipv4Addr> {
     }
 }
 
-async fn in_zone(addresses: Addresses, if_name: &str) -> bool {
+async fn find_addr(addresses: Addresses, if_name: &str) -> Option<Ipv4Addr> {
     let mut addrs = pin!(addresses.stream());
     while let Some(am) = addrs.next().await {
-        if let Some(addr) = parse_addr(&am, if_name) {
-            info!("{}: {}", if_name, addr);
-            return true;
+        let r = parse_addr(&am, if_name);
+        if r.is_some() {
+            return r;
         }
     }
-    false
+    None
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -44,28 +44,31 @@ async fn main() -> io::Result<()> {
     let app = App::new();
     let if_name = &app.if_name;
 
-    let c = Connection::new()?.spawn();
-    if in_zone(c.addresses, if_name).await {
-        app.enter_zone().await;
+    let c = Connection::new()?;
+    let h = c.handle;
+    tokio::spawn(c.conn);
+
+    if let Some(addr) = find_addr(h.addresses, if_name).await {
+        info!("{}: {}", if_name, addr);
+        if !app.notify(addr, true).await {
+            app.fallback().await;
+        }
     } else {
-        app.exit_zone().await;
+        info!("{}: no address", if_name);
+        app.fallback().await;
     }
 
-    let mut msgs = pin!(c.monitor.stream());
+    let mut msgs = pin!(h.monitor.stream());
     while let Some(msg) = msgs.next().await {
         let am = msg.addr();
         if let Some(addr) = parse_addr(am, if_name) {
-            if msg.is_new() {
+            let enter = msg.is_new();
+            if enter {
                 info!("new: {}: {}", if_name, addr);
-                if app.in_zone(addr) {
-                    app.enter_zone().await;
-                }
             } else {
                 info!("del: {}: {}", if_name, addr);
-                if app.in_zone(addr) {
-                    app.exit_zone().await;
-                }
             }
+            app.notify(addr, enter).await;
         }
     }
     Err(io::Error::from(io::ErrorKind::ConnectionAborted))

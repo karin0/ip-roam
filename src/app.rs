@@ -5,17 +5,22 @@ use reqwest::{header, Client, ClientBuilder, Url};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct Rule {
+    ip_min: Ipv4Addr,
+    ip_max: Ipv4Addr,
+    proxy_in: String,
+    proxy_out: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct Config {
     #[serde(alias = "interface")]
     if_name: String,
     #[serde(alias = "external-controller")]
     api: String,
     secret: String,
-    ip_min: Ipv4Addr,
-    ip_max: Ipv4Addr,
-    proxy_in: String,
-    proxy_out: String,
     selector: String,
+    rules: Vec<Rule>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -31,15 +36,18 @@ fn get_config_path() -> Option<String> {
     None
 }
 
+impl Rule {
+    pub(crate) fn has(&self, addr: Ipv4Addr) -> bool {
+        addr >= self.ip_min && addr < self.ip_max
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct App {
     pub(crate) if_name: String,
     url: Url,
     http: Client,
-    ip_min: Ipv4Addr,
-    ip_max: Ipv4Addr,
-    proxy_in: String,
-    proxy_out: String,
+    rules: Vec<Rule>,
 }
 
 impl App {
@@ -64,6 +72,10 @@ impl App {
         let mut conf: Config = serde_yaml::from_str(&config).unwrap();
         let secret = std::mem::replace(&mut conf.secret, "***".to_string());
         info!("config: {:?}", conf);
+        if conf.rules.is_empty() {
+            panic!("no rules");
+        }
+        conf.rules.shrink_to_fit();
 
         let mut h = header::HeaderMap::new();
         let auth = format!("Bearer {}", secret);
@@ -77,15 +89,8 @@ impl App {
             if_name: conf.if_name,
             url: Url::parse(&url).unwrap(),
             http,
-            ip_min: conf.ip_min,
-            ip_max: conf.ip_max,
-            proxy_in: conf.proxy_in,
-            proxy_out: conf.proxy_out,
+            rules: conf.rules,
         }
-    }
-
-    pub(crate) fn in_zone(&self, addr: Ipv4Addr) -> bool {
-        addr >= self.ip_min && addr < self.ip_max
     }
 
     async fn clash_get(&self) -> reqwest::Result<String> {
@@ -110,37 +115,56 @@ impl App {
         Ok(())
     }
 
-    async fn _enter_zone(&self) -> reqwest::Result<()> {
+    async fn _enter_zone(&self, rule: &Rule) -> reqwest::Result<bool> {
         let now = self.clash_get().await?;
-        if now != self.proxy_in {
-            self.clash_put(&self.proxy_in).await?;
-            info!("enter_zone: {} -> {}", now, self.proxy_in);
+        Ok(if now != rule.proxy_in {
+            self.clash_put(&rule.proxy_in).await?;
+            info!("enter: {} -> {}", now, rule.proxy_in);
+            true
         } else {
-            warn!("enter_zone: already {}", now);
-        }
-        Ok(())
+            warn!("enter: already {}", now);
+            false
+        })
     }
 
-    async fn _exit_zone(&self) -> reqwest::Result<()> {
+    async fn _exit_zone(&self, rule: &Rule) -> reqwest::Result<bool> {
         let now = self.clash_get().await?;
-        if now == self.proxy_in {
-            self.clash_put(&self.proxy_out).await?;
-            info!("exit_zone: {} -> {}", now, self.proxy_out);
+        Ok(if now == rule.proxy_in {
+            self.clash_put(&rule.proxy_out).await?;
+            info!("exit: {} -> {}", now, rule.proxy_out);
+            true
         } else {
-            warn!("exit_zone: already {}", now);
-        }
-        Ok(())
+            warn!("exit: already {}", now);
+            false
+        })
     }
 
-    pub(crate) async fn enter_zone(&self) {
-        if let Err(e) = self._enter_zone().await {
-            error!("enter_zone: {:?}", e);
+    async fn _handle_zone(&self, rule: &Rule, enter: bool) -> bool {
+        let r = if enter {
+            self._enter_zone(rule).await
+        } else {
+            self._exit_zone(rule).await
+        };
+
+        match r {
+            Ok(r) => r,
+            Err(e) => {
+                error!("{}: {:?}", if enter { "enter" } else { "exit" }, e);
+                false
+            }
         }
     }
 
-    pub(crate) async fn exit_zone(&self) {
-        if let Err(e) = self._exit_zone().await {
-            error!("exit_zone: {:?}", e);
+    pub(crate) async fn notify(&self, addr: Ipv4Addr, enter: bool) -> bool {
+        for rule in &self.rules {
+            if rule.has(addr) && self._handle_zone(rule, enter).await {
+                return true;
+            }
         }
+        false
+    }
+
+    pub(crate) async fn fallback(&self) {
+        self._handle_zone(&self.rules[0], false).await;
     }
 }
