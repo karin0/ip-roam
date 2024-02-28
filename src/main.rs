@@ -50,12 +50,10 @@ async fn main() -> io::Result<()> {
 
     if let Some(addr) = find_addr(h.addresses, if_name).await {
         info!("{}: {}", if_name, addr);
-        if !app.notify(addr, true).await {
-            app.fallback().await;
-        }
+        app.initialize(addr).await;
     } else {
         info!("{}: no address", if_name);
-        app.fallback().await;
+        app.initialize(Ipv4Addr::UNSPECIFIED).await;
     }
 
     let mut msgs = pin!(h.monitor.stream());

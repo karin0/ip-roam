@@ -13,14 +13,19 @@ pub struct Rule {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct Site {
+    selector: String,
+    rules: Vec<Rule>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct Config {
     #[serde(alias = "interface")]
     if_name: String,
     #[serde(alias = "external-controller")]
     api: String,
     secret: String,
-    selector: String,
-    rules: Vec<Rule>,
+    sites: Vec<Site>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,9 +50,9 @@ impl Rule {
 #[derive(Debug, Clone)]
 pub struct App {
     pub(crate) if_name: String,
-    url: Url,
+    api: String,
     http: Client,
-    rules: Vec<Rule>,
+    sites: Vec<Site>,
 }
 
 impl App {
@@ -72,10 +77,17 @@ impl App {
         let mut conf: Config = serde_yaml::from_str(&config).unwrap();
         let secret = std::mem::replace(&mut conf.secret, "***".to_string());
         info!("config: {:?}", conf);
-        if conf.rules.is_empty() {
-            panic!("no rules");
+
+        if conf.sites.is_empty() {
+            panic!("no sites");
         }
-        conf.rules.shrink_to_fit();
+        conf.sites.shrink_to_fit();
+        for site in &mut conf.sites {
+            if site.rules.is_empty() {
+                panic!("site {}: no rules", site.selector);
+            }
+            site.rules.shrink_to_fit();
+        }
 
         let mut h = header::HeaderMap::new();
         let auth = format!("Bearer {}", secret);
@@ -84,30 +96,28 @@ impl App {
             header::HeaderValue::from_str(&auth).unwrap(),
         );
         let http = ClientBuilder::new().default_headers(h).build().unwrap();
-        let url = format!("http://{}/proxies/{}", conf.api, conf.selector);
         Self {
             if_name: conf.if_name,
-            url: Url::parse(&url).unwrap(),
+            api: conf.api,
             http,
-            rules: conf.rules,
+            sites: conf.sites,
         }
     }
 
-    async fn clash_get(&self) -> reqwest::Result<String> {
-        let r: ClashStatus = self
-            .http
-            .get(self.url.as_ref())
-            .send()
-            .await?
-            .json()
-            .await?;
+    fn url(&self, site: &Site) -> Url {
+        let url = format!("http://{}/proxies/{}", self.api, site.selector);
+        Url::parse(&url).unwrap()
+    }
+
+    async fn clash_get(&self, site: &Site) -> reqwest::Result<String> {
+        let r: ClashStatus = self.http.get(self.url(site)).send().await?.json().await?;
         Ok(r.now)
     }
 
-    async fn clash_put(&self, proxy: &str) -> reqwest::Result<()> {
+    async fn clash_put(&self, site: &Site, proxy: &str) -> reqwest::Result<()> {
         let body = format!(r#"{{"name":"{}"}}"#, proxy);
         self.http
-            .put(self.url.as_ref())
+            .put(self.url(site))
             .body(body)
             .send()
             .await?
@@ -115,56 +125,65 @@ impl App {
         Ok(())
     }
 
-    async fn _enter_zone(&self, rule: &Rule) -> reqwest::Result<bool> {
-        let now = self.clash_get().await?;
-        Ok(if now != rule.proxy_in {
-            self.clash_put(&rule.proxy_in).await?;
-            info!("enter: {} -> {}", now, rule.proxy_in);
-            true
+    async fn _enter_zone(&self, site: &Site, rule: &Rule) -> reqwest::Result<()> {
+        let now = self.clash_get(site).await?;
+        if now != rule.proxy_in {
+            self.clash_put(site, &rule.proxy_in).await?;
+            info!("enter: {}: {} -> {}", site.selector, now, rule.proxy_in);
         } else {
-            warn!("enter: already {}", now);
-            false
-        })
+            warn!("enter: {}: already {}", site.selector, now);
+        }
+        Ok(())
     }
 
-    async fn _exit_zone(&self, rule: &Rule) -> reqwest::Result<bool> {
-        let now = self.clash_get().await?;
-        Ok(if now == rule.proxy_in {
-            self.clash_put(&rule.proxy_out).await?;
-            info!("exit: {} -> {}", now, rule.proxy_out);
-            true
+    async fn _exit_zone(&self, site: &Site, rule: &Rule) -> reqwest::Result<()> {
+        let now = self.clash_get(site).await?;
+        if now == rule.proxy_in {
+            self.clash_put(site, &rule.proxy_out).await?;
+            info!("exit: {}: {} -> {}", site.selector, now, rule.proxy_out);
         } else {
-            warn!("exit: already {}", now);
-            false
-        })
+            warn!("exit: {}: already {}", site.selector, now);
+        }
+        Ok(())
     }
 
-    async fn _handle_zone(&self, rule: &Rule, enter: bool) -> bool {
+    async fn _handle_zone(&self, site: &Site, rule: &Rule, enter: bool) {
         let r = if enter {
-            self._enter_zone(rule).await
+            self._enter_zone(site, rule).await
         } else {
-            self._exit_zone(rule).await
+            self._exit_zone(site, rule).await
         };
-
-        match r {
-            Ok(r) => r,
-            Err(e) => {
-                error!("{}: {:?}", if enter { "enter" } else { "exit" }, e);
-                false
-            }
+        if let Err(e) = r {
+            error!(
+                "{}: {}: {:?}",
+                if enter { "enter" } else { "exit" },
+                site.selector,
+                e
+            );
         }
     }
 
-    pub(crate) async fn notify(&self, addr: Ipv4Addr, enter: bool) -> bool {
-        for rule in &self.rules {
-            if rule.has(addr) && self._handle_zone(rule, enter).await {
+    async fn _notify(&self, site: &Site, addr: Ipv4Addr, enter: bool) -> bool {
+        for rule in &site.rules {
+            if rule.has(addr) {
+                self._handle_zone(site, rule, enter).await;
                 return true;
             }
         }
         false
     }
 
-    pub(crate) async fn fallback(&self) {
-        self._handle_zone(&self.rules[0], false).await;
+    pub(crate) async fn notify(&self, addr: Ipv4Addr, enter: bool) {
+        for site in &self.sites {
+            self._notify(site, addr, enter).await;
+        }
+    }
+
+    pub(crate) async fn initialize(&self, addr: Ipv4Addr) {
+        for site in &self.sites {
+            if !self._notify(site, addr, true).await {
+                self._handle_zone(site, &site.rules[0], false).await;
+            }
+        }
     }
 }
